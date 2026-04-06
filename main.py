@@ -89,6 +89,10 @@ class LobbyView(discord.ui.View):
         if interaction.user in self.players:
             await interaction.response.send_message("Você já está na copa!", ephemeral=True)
             return
+
+        if not interaction.user.voice or interaction.user.voice.channel.name.lower() != "lobby":
+            await interaction.response.send_message("Você precisa estar no canal de voz 'lobby' para entrar na copa.", ephemeral=True)
+            return
             
         user_data = database.get_user_profile(str(interaction.user.id))
         if not user_data:
@@ -119,13 +123,38 @@ class LobbyView(discord.ui.View):
             item.disabled = True
             
         embed = interaction.message.embeds[0]
-        embed.title = "Copa em Andamento! 🏁"
+        embed.title = f"Copa em Andamento! 🏁 (ID: {lobby_id})"
         embed.color = discord.Color.red()
         await interaction.message.edit(embed=embed, view=self)
+        
+        # Create temp voice channel
+        guild = interaction.guild
+        category = interaction.channel.category
+        try:
+            temp_vc = await guild.create_voice_channel(f"match-{lobby_id}", category=category)
+            
+            # Move players
+            for player in self.players:
+                if player.voice and player.voice.channel:
+                    try:
+                        await player.move_to(temp_vc)
+                    except discord.HTTPException:
+                        pass
+        except discord.Forbidden:
+            pass
+
         await interaction.response.send_message(f"A copa começou! Host: {self.host.mention}. Usem `/finalizar_copa {lobby_id}` quando terminarem.")
 
 @bot.tree.command(name="criar_copa", description="Abre um lobby para os jogadores entrarem.")
 async def criar_copa(interaction: discord.Interaction):
+    if interaction.channel.name.lower() != "copas":
+        await interaction.response.send_message("Este comando só pode ser usado no canal de texto 'copas'.", ephemeral=True)
+        return
+
+    if not interaction.user.voice or interaction.user.voice.channel.name.lower() != "lobby":
+        await interaction.response.send_message("Você precisa estar no canal de voz 'lobby' para criar uma copa.", ephemeral=True)
+        return
+
     user_data = database.get_user_profile(str(interaction.user.id))
     if not user_data:
         await interaction.response.send_message("Você precisa se registrar primeiro! Use `/registrar`.", ephemeral=True)
@@ -174,6 +203,24 @@ class WinnerSelect(discord.ui.Select):
                 await process_match_results(interaction, self.parent_view.players, w_id)
                 self.parent_view.stop()
                 self.disabled = True
+                
+                # Cleanup voice channel
+                guild = interaction.guild
+                lobby_vc = discord.utils.find(lambda c: c.name.lower() == "lobby", guild.voice_channels)
+                temp_vc = discord.utils.get(guild.voice_channels, name=f"match-{self.parent_view.lobby_id}")
+                
+                if temp_vc:
+                    for member in temp_vc.members:
+                        if lobby_vc:
+                            try:
+                                await member.move_to(lobby_vc)
+                            except discord.HTTPException:
+                                pass
+                    try:
+                        await temp_vc.delete()
+                    except discord.HTTPException:
+                        pass
+                
                 await interaction.message.edit(content=f"**Partida Finalizada!** O vencedor foi <@{w_id}>! 🏆", view=self.parent_view)
                 return
 
